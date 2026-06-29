@@ -42,10 +42,13 @@ def keyword_matches(title, keyword):
 
     - 영문/숫자 토큰(PE, PEF, GP 등)은 단어 경계로 매칭해 'Paperless' 같은
       단어 안에 우연히 포함되는 오탐을 막는다.
-    - 한글 토큰은 부분 문자열로 매칭한다.
+    - 한글 토큰은 '띄어쓰기를 무시하고' 부분 문자열로 매칭한다.
+      예) 키워드 '위탁운용사선정' 또는 '위탁 운용사 선정' 모두
+          제목 '위탁운용사 선정 공고'와 매칭된다.
     - 공백으로 나뉜 여러 토큰은 모두 존재해야 매칭(순서 무관).
       예) '위탁 운용사 선정' -> 위탁 AND 운용사 AND 선정
     """
+    title_nospace = re.sub(r"\s+", "", title)
     tokens = keyword.split()
     if not tokens:
         return False
@@ -54,7 +57,7 @@ def keyword_matches(title, keyword):
             if not re.search(r"\b" + re.escape(tok) + r"\b", title, re.IGNORECASE):
                 return False
         else:
-            if tok not in title:
+            if tok not in title_nospace:
                 return False
     return True
 
