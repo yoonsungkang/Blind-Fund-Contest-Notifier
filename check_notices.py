@@ -25,8 +25,9 @@ DEFAULT_BOARD = "https://www.kdb.co.kr/CHBIPR23N00.act?_mnuId=IHIHIR0087"
 
 
 def load_json(path, default):
+    # utf-8-sig: PowerShell 등이 붙이는 BOM이 있어도 안전하게 읽는다.
     if path.exists():
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     return default
 
@@ -102,6 +103,7 @@ def scrape_notices(board_url, timeout_ms=45000):
             title_el = cells[2].query_selector("a")
             raw_title = title_el.inner_text() if title_el else cells[2].inner_text()
             title = re.sub(r"\s+", " ", raw_title).strip()
+            title = re.sub(r"\s*새글\s*$", "", title)  # 목록의 '새글' 배지 제거
             files = []
             for a in cells[3].query_selector_all("a[href]"):
                 href = a.get_attribute("href")
@@ -183,6 +185,14 @@ def main():
     if not notices:
         print("ERROR: 공지 목록을 가져오지 못했습니다.", file=sys.stderr)
         sys.exit(1)
+
+    # --test: 키워드/상태와 무관하게 최신 공지 1건을 보내 파이프라인을 점검한다.
+    if "--test" in sys.argv:
+        latest = max(notices, key=lambda n: n["num"])
+        send_telegram(token, chat_id, latest, ["(연결 테스트)"], board_url)
+        print(f"테스트 알림 발송: #{latest['num']} {latest['title']}")
+        print("(state.json은 변경하지 않았습니다)")
+        return
 
     max_num = max(n["num"] for n in notices)
 
