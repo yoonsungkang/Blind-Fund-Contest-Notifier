@@ -50,5 +50,12 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git commit -m "update state [skip ci]"
-            git push
+            # 원격이 앞서 있어도 안전하게: 충돌 시 재동기화 후 재시도
+            for i in 1 2 3; do
+              if git push; then
+                break
+              fi
+              echo "push 거부 - 원격과 동기화 후 재시도 ($i/3)"
+              git pull --rebase --autostash origin main || true
+            done
           fi
