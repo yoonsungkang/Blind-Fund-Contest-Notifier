@@ -257,8 +257,12 @@ def send_telegram(token, chat_id, source_name, notice, keywords_hit):
         },
         timeout=30,
     )
-    resp.raise_for_status()
-    return resp.json()
+    if not resp.ok:
+        raise RuntimeError(f"텔레그램 HTTP {resp.status_code}: {resp.text[:300]}")
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"텔레그램 응답 실패: {resp.text[:300]}")
+    return data
 
 
 def scrape_with_retry(scrape_fn, tries=3):
@@ -291,6 +295,7 @@ def main():
         state["kdb"] = state.pop("last_seen")
 
     total_sent = 0
+    send_errors = 0
     for src in SOURCES:
         key, name = src["key"], src["name"]
         print(f"[{name}] 수집 중...")
@@ -319,25 +324,37 @@ def main():
             continue
 
         sent = 0
+        highest_ok = last_seen  # 안전하게 저장 가능한 최대 uid (발송 성공/불일치까지만)
         for n in new_items:
             hits = matched_keywords(n["title"], keywords) if keywords else ["(전체)"]
             if not hits:
+                highest_ok = n["uid"]  # 키워드 불일치 = 처리 완료, 통과 가능
                 continue
             try:
                 send_telegram(token, chat_id, name, n, hits)
                 sent += 1
+                highest_ok = n["uid"]
                 print(f"[{name}] 알림: #{n['uid']} {n['title']} (키워드: {hits})")
                 time.sleep(1)
             except Exception as e:  # noqa: BLE001
                 print(f"[{name}] 발송 실패 #{n['uid']}: {e}", file=sys.stderr)
+                send_errors += 1
+                break  # 진행 멈춤 - state를 넘기지 않아 다음 실행에서 재시도(누락 방지)
 
-        state[key] = max_uid
+        state[key] = highest_ok
         total_sent += sent
-        print(f"[{name}] 새 글 {len(new_items)}건 중 {sent}건 발송, last_seen -> {max_uid}")
+        print(f"[{name}] 새 글 {len(new_items)}건 중 {sent}건 발송, last_seen -> {highest_ok}")
 
     if not test_mode:
         save_state(state)
         print(f"완료: 총 {total_sent}건 발송. state={state}")
+        if send_errors:
+            print(
+                f"ERROR: 텔레그램 발송 실패 {send_errors}건 - 토큰/chat_id(Secret) 확인 필요. "
+                "다음 실행에서 재시도합니다.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 if __name__ == "__main__":
