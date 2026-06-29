@@ -1,0 +1,54 @@
+name: KDB 공지 알리미
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # 약 15분마다 (GitHub 사정에 따라 다소 지연될 수 있음)
+  workflow_dispatch: {}        # Actions 탭에서 수동 실행 버튼
+
+concurrency:
+  group: kdb-notice
+  cancel-in-progress: false
+
+permissions:
+  contents: write              # state.json 커밋용
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-1.48.0
+
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Check notices
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python check_notices.py
+
+      - name: Commit state if changed
+        run: |
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "state 변화 없음 - 커밋 생략"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "update state [skip ci]"
+            git push
+          fi
