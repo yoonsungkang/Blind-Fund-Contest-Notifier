@@ -2,7 +2,7 @@ name: KDB 공지 알리미
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # 약 15분마다 (GitHub 사정에 따라 다소 지연될 수 있음)
+    - cron: '*/5 * * * *'    # 약 5분마다 (GitHub 사정에 따라 다소 지연될 수 있음)
   workflow_dispatch: {}        # Actions 탭에서 수동 실행 버튼
 
 concurrency:
