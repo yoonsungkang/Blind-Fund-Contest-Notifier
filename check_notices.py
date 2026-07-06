@@ -1,3 +1,13 @@
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
+    'Connection': 'keep-alive',
+}
+
 #!/usr/bin/env python3
 """정책금융기관 공지 실시간 알리미 (텔레그램).
 
