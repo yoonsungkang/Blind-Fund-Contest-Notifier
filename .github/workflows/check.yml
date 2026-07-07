@@ -15,25 +15,15 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Playwright 공식 이미지: 크로미움 + 시스템 의존성이 모두 포함돼 있어
+    # apt-get update(러너의 깨진 MS 저장소 서명 오류)를 아예 거치지 않는다.
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.48.0-noble
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-chromium-1.48.0
-
-      - name: Install Chromium
-        run: python -m playwright install --with-deps chromium
 
       - name: Check notices
         env:
@@ -43,6 +33,8 @@ jobs:
 
       - name: Commit state if changed
         run: |
+          # 컨테이너 안에서 workspace를 안전 디렉토리로 등록(git 소유권 경고 방지)
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git add state.json
           if git diff --cached --quiet; then
             echo "state 변화 없음 - 커밋 생략"
