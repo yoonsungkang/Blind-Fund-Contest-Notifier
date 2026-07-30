@@ -98,60 +98,101 @@ def matched_keywords(title, keywords):
 # --------------------------------------------------------------------------
 # 사이트별 수집기  ->  [{uid:int, category, title, date, url, files:[{name,url}]}]
 # --------------------------------------------------------------------------
-def scrape_kdb(url=KDB_BOARD, timeout_ms=45000):
-    """KDB 산업은행: JS 렌더링이라 Playwright로 표를 읽는다."""
+def scrape_kdb(url=KDB_BOARD, timeout_ms=45000, pages=1):
+    """KDB 산업은행: JS 렌더링이라 Playwright로 표를 읽는다.
+
+    pages>1 이면 하단 페이저(#pagination a.page-link)를 클릭해 다음 쪽을 읽는다.
+    한 쪽 = 10건 ≈ 7일치라(실측) 기간 조회(PEF 트랙)는 여러 쪽이 필요하다.
+    알리미 본체는 기본값 1쪽 그대로다.
+    """
     from playwright.sync_api import sync_playwright
 
+    wait_rows = """() => {
+        const rows = document.querySelectorAll('#tableList tbody tr');
+        if (!rows.length) return false;
+        const first = rows[0].querySelector('td');
+        return first && /^\\d+$/.test(first.textContent.trim());
+    }"""
     notices = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(user_agent=UA)
         page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        page.wait_for_function(
-            """() => {
-                const rows = document.querySelectorAll('#tableList tbody tr');
-                if (!rows.length) return false;
-                const first = rows[0].querySelector('td');
-                return first && /^\\d+$/.test(first.textContent.trim());
-            }""",
-            timeout=timeout_ms,
-        )
-        for row in page.query_selector_all("#tableList tbody tr"):
-            cells = row.query_selector_all("td")
-            if len(cells) < 5:
-                continue
-            num_text = cells[0].inner_text().strip()
-            if not num_text.isdigit():
-                continue
-            title_el = cells[2].query_selector("a")
-            raw = title_el.inner_text() if title_el else cells[2].inner_text()
-            files = []
-            for a in cells[3].query_selector_all("a[href]"):
-                href = a.get_attribute("href")
-                name = (a.get_attribute("title") or "첨부파일").strip()
-                if href:
-                    files.append({"name": name, "url": href})
-            notices.append(
-                {
-                    "uid": int(num_text),
-                    "category": cells[1].inner_text().strip(),
-                    "title": clean_title(raw),
-                    "date": cells[4].inner_text().strip(),
-                    "url": url,
-                    "files": files,
-                }
+        page.wait_for_function(wait_rows, timeout=timeout_ms)
+
+        def read_rows():
+            for row in page.query_selector_all("#tableList tbody tr"):
+                cells = row.query_selector_all("td")
+                if len(cells) < 5:
+                    continue
+                num_text = cells[0].inner_text().strip()
+                if not num_text.isdigit():
+                    continue
+                title_el = cells[2].query_selector("a")
+                raw = title_el.inner_text() if title_el else cells[2].inner_text()
+                files = []
+                for a in cells[3].query_selector_all("a[href]"):
+                    href = a.get_attribute("href")
+                    name = (a.get_attribute("title") or "첨부파일").strip()
+                    if href:
+                        files.append({"name": name, "url": href})
+                notices.append(
+                    {
+                        "uid": int(num_text),
+                        "category": cells[1].inner_text().strip(),
+                        "title": clean_title(raw),
+                        "date": cells[4].inner_text().strip(),
+                        "url": url,
+                        "files": files,
+                    }
+                )
+
+        read_rows()
+        for pno in range(2, pages + 1):
+            link = page.query_selector(
+                f"#pagination li.page-item a.page-link:text-is('{pno}')"
             )
+            if not link:  # 게시글이 적어 페이저에 그 쪽이 없다
+                break
+            prev_top = page.eval_on_selector(
+                "#tableList tbody tr td", "el => el.textContent.trim()"
+            )
+            link.click()
+            page.wait_for_function(
+                """(prev) => {
+                    const rows = document.querySelectorAll('#tableList tbody tr');
+                    if (!rows.length) return false;
+                    const first = rows[0].querySelector('td');
+                    return first && /^\\d+$/.test(first.textContent.trim())
+                           && first.textContent.trim() !== prev;
+                }""",
+                arg=prev_top,
+                timeout=timeout_ms,
+            )
+            read_rows()
         browser.close()
     return notices
 
 
-def scrape_kgrowth(url=KGROWTH_BOARD):
-    """한국성장금융 출자사업공고: 정적 HTML(EUC-KR)."""
+def scrape_kgrowth(url=KGROWTH_BOARD, pages=1):
+    """한국성장금융 출자사업공고: 정적 HTML(EUC-KR).
+
+    pages>1 이면 ?page=N 으로 다음 쪽도 읽는다(실측: 2쪽 idx=1087~1078).
+    상단 고정공지가 매 쪽 반복되지만 checked() 의 uid 중복 제거가 걸러낸다.
+    """
     from bs4 import BeautifulSoup
 
-    resp = requests.get(url, headers=HEADERS, timeout=30)
-    resp.encoding = "euc-kr"
-    soup = BeautifulSoup(resp.text, "html.parser")
+    notices = []
+    for pno in range(1, pages + 1):
+        resp = requests.get(url, params={"page": pno} if pno > 1 else None,
+                            headers=HEADERS, timeout=30)
+        resp.encoding = "euc-kr"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        notices.extend(_parse_kgrowth(soup))
+    return notices
+
+
+def _parse_kgrowth(soup):
     notices = []
     for a in soup.select('a[href*="notice_view.asp"]'):
         href = a.get("href", "")
@@ -183,8 +224,10 @@ def scrape_kgrowth(url=KGROWTH_BOARD):
     return notices
 
 
-def scrape_koreaexim(url=EXIM_BOARD):
+def scrape_koreaexim(url=EXIM_BOARD, pages=1):
     """한국수출입은행 공지/입찰: 정적 HTML.
+
+    pages>1 이면 ?curPage=N 으로 다음 쪽도 읽는다(실측: 페이저가 ?curPage=N 링크).
 
     참고: koreaexim 서버가 중간 인증서 체인을 완전히 내려주지 않아
     GitHub Actions(Ubuntu) 러너에서 CERTIFICATE_VERIFY_FAILED가 발생.
@@ -208,10 +251,18 @@ def scrape_koreaexim(url=EXIM_BOARD):
 
     sess = requests.Session()
     sess.mount("https://", _LegacyAdapter())
-    resp = sess.get(url, headers=HEADERS, timeout=30, verify=False)
-    resp.raise_for_status()
-    resp.encoding = resp.apparent_encoding or "utf-8"
-    soup = BeautifulSoup(resp.text, "html.parser")
+    notices = []
+    for pno in range(1, pages + 1):
+        resp = sess.get(url, params={"curPage": pno} if pno > 1 else None,
+                        headers=HEADERS, timeout=30, verify=False)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        notices.extend(_parse_koreaexim(soup))
+    return notices
+
+
+def _parse_koreaexim(soup):
     notices = []
     for item in soup.select("div.notice-list-item"):
         subj = item.select_one("span.subject a[href]")
