@@ -189,10 +189,26 @@ def scrape_koreaexim(url=EXIM_BOARD):
     참고: koreaexim 서버가 중간 인증서 체인을 완전히 내려주지 않아
     GitHub Actions(Ubuntu) 러너에서 CERTIFICATE_VERIFY_FAILED가 발생.
     공지 목록 크롤링 용도이므로 이 요청에 한해 verify=False로 우회한다.
+    또한 legacy TLS renegotiation을 요구해(OpenSSL 3.x 기본 거부 → ConnectionReset)
+    OP_LEGACY_SERVER_CONNECT 컨텍스트의 세션으로 요청한다.
     """
+    import ssl
     from bs4 import BeautifulSoup
+    from requests.adapters import HTTPAdapter
 
-    resp = requests.get(url, headers=HEADERS, timeout=30, verify=False)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.options |= 0x4  # OP_LEGACY_SERVER_CONNECT
+
+    class _LegacyAdapter(HTTPAdapter):
+        def init_poolmanager(self, *a, **kw):
+            kw["ssl_context"] = ctx
+            return super().init_poolmanager(*a, **kw)
+
+    sess = requests.Session()
+    sess.mount("https://", _LegacyAdapter())
+    resp = sess.get(url, headers=HEADERS, timeout=30, verify=False)
     resp.raise_for_status()
     resp.encoding = resp.apparent_encoding or "utf-8"
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -232,10 +248,34 @@ def scrape_koreaexim(url=EXIM_BOARD):
     return notices
 
 
+def checked(scrape_fn):
+    """수집기 공통 후처리. SOURCES 를 쓰는 모든 호출자(알리미·PEF 트랙)가 여기를 지난다.
+
+    - uid 중복 제거: 성장금융은 상단 고정공지가 일반목록에도 같이 나와 같은 글이 두 번
+      들어온다(2026-07 기준 idx=1088). 그대로 두면 텔레그램 2회 발송 / PEF 이중 기입.
+    - 0건이면 예외: 세 게시판 모두 상시 게시글이 있어 정상적으로 0건이 될 수 없다.
+      셀렉터 미스·차단을 '새 글 없음'으로 삼키지 않도록 실패로 올린다.
+    """
+
+    def wrapped(*args, **kwargs):
+        seen, uniq = set(), []
+        for n in scrape_fn(*args, **kwargs):
+            if n["uid"] in seen:
+                continue
+            seen.add(n["uid"])
+            uniq.append(n)
+        if not uniq:
+            raise RuntimeError(f"{scrape_fn.__name__}: 목록 0건 - 사이트 구조 변경/차단 의심")
+        return uniq
+
+    wrapped.__name__ = scrape_fn.__name__
+    return wrapped
+
+
 SOURCES = [
-    {"key": "kdb", "name": "산업은행", "scrape": scrape_kdb},
-    {"key": "kgrowth", "name": "한국성장금융", "scrape": scrape_kgrowth},
-    {"key": "koreaexim", "name": "수출입은행", "scrape": scrape_koreaexim},
+    {"key": "kdb", "name": "산업은행", "scrape": checked(scrape_kdb)},
+    {"key": "kgrowth", "name": "한국성장금융", "scrape": checked(scrape_kgrowth)},
+    {"key": "koreaexim", "name": "수출입은행", "scrape": checked(scrape_koreaexim)},
 ]
 
 
@@ -372,5 +412,23 @@ def main():
             sys.exit(1)
 
 
+def demo():
+    """python check_notices.py --selfcheck  (네트워크·텔레그램 접촉 없음)"""
+    a, b = {"uid": 1088, "title": "고정공지"}, {"uid": 1097, "title": "일반"}
+    assert checked(lambda: [a, b, a])() == [a, b]          # 중복 uid 1건으로
+    assert checked(lambda: [a])() == [a]
+    try:
+        checked(lambda: [])()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("0건인데 예외가 안 났다")
+    assert checked(lambda url="x": [{"uid": 1, "u": url}])(url="y")[0]["u"] == "y"  # 인자 통과
+    print("ok")
+
+
 if __name__ == "__main__":
-    main()
+    if "--selfcheck" in sys.argv:
+        demo()
+    else:
+        main()
