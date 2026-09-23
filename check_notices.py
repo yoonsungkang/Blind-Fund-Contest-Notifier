@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """정책금융기관 공지 실시간 알리미 (텔레그램).
 
-감시 대상:
-  - KDB 산업은행 공지사항 (JS 렌더링 → Playwright)
-  - 한국성장금융 출자사업공고 (정적 HTML, EUC-KR)
-  - 한국수출입은행 공지/입찰 (정적 HTML)
+감시 대상: 정책금융기관·연기금·공제회 공식 게시판과 KVCA 보완 공고.
 
 각 사이트에서 새 글을 감지하고, 제목이 키워드와 맞으면 텔레그램으로 알린다.
 사이트별 마지막으로 본 글 ID는 state.json에 저장한다.
@@ -15,7 +12,9 @@ import os
 import re
 import sys
 import time
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 import urllib3
@@ -45,6 +44,18 @@ KGROWTH_BOARD = "https://www.kgrowth.or.kr/notice.asp"
 KGROWTH_BASE = "https://www.kgrowth.or.kr/"
 EXIM_BOARD = "https://www.koreaexim.go.kr/HPHKBI039M01"
 EXIM_BASE = "https://www.koreaexim.go.kr"
+KVIC_BOARD = "https://www.kvic.or.kr/notice/kvic-notice/investment-business-notice"
+NPS_BOARD = "https://fund.nps.or.kr/impa/dlnginstslctnpbanclist/getOHEF0017M0.do"
+NPS_NEWS_BOARD = "https://www.nps.or.kr/pnsgdnc/nscvrgdata/getOHAE0002M0List.do?menuId=MN24000898"
+KTCU_BOARD = "https://www.ktcu.or.kr/PPW-CSB-000101"
+POBA_BOARD = "https://www.poba.or.kr/bbs/selectNttList?sechBbsSeq=10"
+SEMA_BOARD = "https://www.sema.or.kr/sema/bbs/B0000022/list.do?menuNo=200017&optn1=S"
+TP_BOARD = "https://www.tp.or.kr/tp-kr/bbs/i-151/list.do"
+GEPS_BOARD = "https://www.geps.or.kr/notiCommunication_notice"
+PMAA_BOARD = "https://www.pmaa.or.kr/www/1461126378922/bbs.do"
+KBIZ_BOARD = "https://www.kbiz.or.kr/ko/contents/bbs/list.do?mnSeq=211"
+CW_BOARD = "https://www.cw.or.kr/board.do?boardConfigNo=29&menuNo=248&boardCategoryNo=66"
+KVCA_BOARD = "https://www.kvca.or.kr/Program/invest/list.html?a_cd=8&a_gb=board&a_item=0&sm=2_2_2"
 
 
 # --------------------------------------------------------------------------
@@ -66,7 +77,7 @@ def save_state(state):
 
 def clean_title(text):
     text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"\s*새글\s*$", "", text)  # 목록의 '새글' 배지 제거
+    text = re.sub(r"\s*(새글|NEW)\s*$", "", text, flags=re.IGNORECASE)
     return text
 
 
@@ -93,6 +104,161 @@ def keyword_matches(title, keyword):
 
 def matched_keywords(title, keywords):
     return [k for k in keywords if keyword_matches(title, k)]
+
+
+def fetch_soup(url):
+    from bs4 import BeautifulSoup
+
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    if (resp.encoding or "").lower() == "iso-8859-1":
+        resp.encoding = resp.apparent_encoding
+    return BeautifulSoup(resp.text, "html.parser")
+
+
+def row_date(element):
+    row = element.find_parent(["tr", "li"]) or element.parent
+    match = re.search(r"\d{4}[-./]\d{2}[-./]\d{2}", row.get_text(" ", strip=True))
+    return match.group(0) if match else ""
+
+
+def scrape_static_board(url, selector, id_pattern, category, detail_url=None):
+    """링크/onclick에 숫자 ID가 있는 정적 게시판 공통 수집기."""
+    notices = []
+    for element in fetch_soup(url).select(selector):
+        marker = " ".join(
+            filter(None, [element.get("href", ""), element.get("onclick", "")])
+        )
+        match = re.search(id_pattern, marker)
+        title = clean_title(element.get_text(" ", strip=True))
+        if not match or not title:
+            continue
+        detail = (
+            detail_url(match, element)
+            if detail_url
+            else urljoin(url, element.get("href", ""))
+        )
+        notices.append(
+            {
+                "uid": int(match.group(1)),
+                "category": category,
+                "title": title,
+                "date": row_date(element),
+                "url": detail,
+                "files": [],
+            }
+        )
+    return notices
+
+
+def pef_title(title):
+    """제목만으로 기관전용 PEF가 명백히 가능한 공고인지 보수적으로 판정."""
+    strong = re.search(
+        r"(?<![A-Za-z])PEF?(?![A-Za-z])|기관전용\s*사모|사모투자|"
+        r"바이아웃|buyout",
+        title,
+        re.IGNORECASE,
+    )
+    if strong:
+        return True
+    if re.search(r"(?<![A-Za-z])VC(?![A-Za-z])|벤처", title, re.IGNORECASE):
+        return False
+    return "블라인드" in title and bool(re.search(r"펀드|위탁운용|출자", title))
+
+
+def vc_only(text):
+    has_vc = bool(re.search(r"(?<![A-Za-z])VC(?![A-Za-z])|벤처", text, re.IGNORECASE))
+    has_pe = bool(
+        re.search(r"(?<![A-Za-z])PEF?(?![A-Za-z])|기관전용\s*사모", text, re.IGNORECASE)
+    )
+    return has_vc and not has_pe
+
+
+def pef_notice(notice, _state=None):
+    return pef_title(notice["title"])
+
+
+def kvic_program_key(title):
+    compact = re.sub(r"\s+", "", title)
+    compact = re.sub(r"20\d{2}년", "", compact)
+    return re.split(r"출자사업|선정공고|접수현황|서류심사|최종선정", compact, maxsplit=1)[0]
+
+
+def kvic_pdf_allows_pef(text):
+    """공고문의 '출자대상/신청가능조합형태' 표 안에 기관전용 PEF가 있는지 본다."""
+    compact = re.sub(r"\s+", "", text)
+    headings = [m.start() for m in re.finditer(r"출자대상|신청가능조합형태", compact)]
+    if not headings:
+        return None
+    target = "기관전용사모집합투자기구"
+    return any(target in compact[pos : pos + 1200] for pos in headings)
+
+
+def kvic_document_allows_pef(notice):
+    """KVIC 출자계획 PDF의 신청 가능 비히클을 확인하고 첨부 링크도 채운다."""
+    from bs4 import BeautifulSoup
+    from pypdf import PdfReader
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    resp = session.get(notice["url"], timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    pdfs = []
+    files = []
+    for anchor in soup.select('a[href*="fileDown"]'):
+        href = urljoin(KVIC_BOARD, anchor.get("href", ""))
+        parent = anchor.parent.get_text(" ", strip=True)
+        name = re.sub(r"\s*(바로보기|내려받기)\s*", " ", parent).strip()
+        if not href or any(f["url"] == href for f in files):
+            continue
+        files.append({"name": name or "첨부파일", "url": href})
+        if ".pdf" in name.lower() and re.search(r"공고|계획", name):
+            pdfs.append(href)
+    notice["files"] = files
+
+    decisions = []
+    for pdf_url in pdfs[:2]:
+        pdf = session.get(pdf_url, headers={"Referer": notice["url"]}, timeout=30)
+        pdf.raise_for_status()
+        if not pdf.content.startswith(b"%PDF"):
+            continue
+        try:
+            text = "\n".join(
+                page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  KVIC PDF 판독 실패: {exc}", file=sys.stderr)
+            continue
+        decision = kvic_pdf_allows_pef(text)
+        if decision is not None:
+            decisions.append(decision)
+    if True in decisions:
+        return True
+    return False if decisions else None
+
+
+def kvic_pef_notice(notice, state):
+    cache = state.setdefault("_kvic_pef_programs", {})
+    key = kvic_program_key(notice["title"])
+    is_plan = "출자계획" in notice.get("category", "")
+
+    if pef_title(notice["title"]):
+        if is_plan and key:
+            cache[key] = True
+        return True
+    if key in cache:
+        return cache[key]
+    if not is_plan:
+        return False
+
+    decision = kvic_document_allows_pef(notice)
+    if decision is not None and key:
+        cache[key] = decision
+    if decision is None:
+        # ponytail: OCR/HWP-only 공고는 오탐 방지를 위해 보류; 실제 누락이 생기면 OCR을 추가한다.
+        print(f"[한국벤처투자] PEF 판정 보류(PDF 텍스트 없음): {notice['title']}")
+    return decision is True
 
 
 # --------------------------------------------------------------------------
@@ -299,12 +465,232 @@ def _parse_koreaexim(soup):
     return notices
 
 
+def scrape_kvic(url=KVIC_BOARD):
+    notices = []
+    for anchor in fetch_soup(url).select('a[href*="board_view"]'):
+        match = re.search(r"board_view\((\d+)\)", anchor.get("href", ""))
+        row = anchor.find_parent("tr")
+        if not match or not row:
+            continue
+        cells = row.find_all("td")
+        category = cells[1].get_text(" ", strip=True).strip("[] ") if len(cells) > 1 else "출자사업"
+        notices.append(
+            {
+                "uid": int(match.group(1)),
+                "category": category,
+                "title": clean_title(anchor.get_text(" ", strip=True)),
+                "date": row_date(anchor),
+                "url": f"{url}?id={match.group(1)}",
+                "files": [],
+            }
+        )
+    return notices
+
+
+def scrape_nps(url=NPS_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="fnc_goBbsDetail"]',
+        r"fnc_goBbsDetail\('ZZ(\d+)',\s*'([^']+)'",
+        "거래기관 선정",
+        lambda m, _e: (
+            "https://fund.nps.or.kr/impa/dlnginstslctnpbancdtl/getOHEF0018M0.do"
+            f"?pstId=ZZ{m.group(1)}&hmpgBbsCd={m.group(2)}"
+        ),
+    )
+
+
+def nps_pef_notice(notice, _state=None):
+    """NPS의 '국내 사모투자'가 실제로는 벤처펀드인 경우를 첨부 공고명으로 제외."""
+    soup = fetch_soup(notice["url"])
+    files = []
+    file_names = []
+    for item in soup.select("div.file-item"):
+        name_el = item.select_one("p.a-file")
+        down = item.select_one('a[href*="fncAtchFileDownload"]')
+        if not name_el or not down:
+            continue
+        match = re.search(r"fncAtchFileDownload\('([^']+)',\s*'(\d+)'", down.get("href", ""))
+        if not match:
+            continue
+        name = re.sub(r"\s*\([\d.]+\s*MB\)\s*$", "", clean_title(name_el.get_text(" ", strip=True)))
+        file_names.append(name)
+        files.append(
+            {
+                "name": name,
+                "url": (
+                    "https://fund.nps.or.kr/fileDown.do"
+                    f"?atchFileId={match.group(1)}&atchFileSn={match.group(2)}"
+                ),
+            }
+        )
+    notice["files"] = files
+    evidence = " ".join(file_names)
+    if evidence and vc_only(evidence):
+        return False
+    return pef_title(notice["title"]) or pef_title(evidence)
+
+
+def scrape_nps_news(url=NPS_NEWS_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="getOHAE0002M1.do"][href*="pstId=ZZ"]',
+        r"pstId=ZZ(\d+)",
+        "보도자료",
+    )
+
+
+def scrape_ktcu(url=KTCU_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="fn_view"]',
+        r"fn_view\('(\d+)'\)",
+        "공지",
+        lambda m, _e: f"{url}/{m.group(1)}",
+    )
+
+
+def scrape_poba(url=POBA_BOARD):
+    """행정공제회 페이지가 자체 렌더링에 쓰는 내장 JSON을 읽는다."""
+    soup = fetch_soup(url)
+    match = re.search(r"var bbsMap = (\{.*?\});", str(soup), re.DOTALL)
+    if not match:
+        return []
+    data = json.loads(match.group(1))["bbsDvo"]["nttDvoList"]
+    return [
+        {
+            "uid": int(item["bbstSeq"]),
+            "category": "공지",
+            "title": clean_title(item["bbstSj"]),
+            "date": item.get("rgstDt", ""),
+            "url": (
+                "https://www.poba.or.kr/bbs/selectNttDetail?sechBbsSeq=10"
+                f"&sechBbstSeq={item['bbstSeq']}"
+            ),
+            "files": [],
+        }
+        for item in data
+        if item.get("bbstSeq") and item.get("bbstSj")
+    ]
+
+
+def scrape_sema(url=SEMA_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="/sema/bbs/B0000022/view.do?nttId="]',
+        r"nttId=(\d+)",
+        "공지",
+    )
+
+
+def scrape_teachers_pension(url=TP_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="detail.do?ntt_sn="]',
+        r"ntt_sn=(\d+)",
+        "공지",
+    )
+
+
+def scrape_geps(url=GEPS_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="/notiCommunication_notice_center/"]',
+        r"notice_center/(\d+)",
+        "공지",
+    )
+
+
+def scrape_pmaa(url=PMAA_BOARD):
+    return scrape_static_board(
+        url,
+        'a[onclick*="fn_view"]',
+        r"fn_view\('(\d+)'\)",
+        "공지",
+        lambda m, _e: f"{url}?bbsIdx={m.group(1)}&type=view",
+    )
+
+
+def scrape_kbiz(url=KBIZ_BOARD):
+    return scrape_static_board(
+        url,
+        'span[onclick*="goView"]',
+        r"goView\((\d+),",
+        "공지",
+        lambda m, _e: (
+            "https://www.kbiz.or.kr/ko/contents/bbs/view.do?mnSeq=211"
+            f"&seq={m.group(1)}"
+        ),
+    )
+
+
+def scrape_cw(url=CW_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="goView"]',
+        r"goView\('29','248','view','(\d+)'",
+        "선정공고(자산운용)",
+        lambda m, _e: (
+            "https://www.cw.or.kr/board.do?boardConfigNo=29&menuNo=248"
+            f"&action=view&boardNo={m.group(1)}"
+        ),
+    )
+
+
+def scrape_kvca(url=KVCA_BOARD):
+    notices = []
+    for row in fetch_soup(url).select("table tr"):
+        cells = row.find_all("td")
+        if len(cells) < 4:
+            continue
+        anchor = cells[2].select_one('a[href*="po_no="]')
+        if not anchor:
+            continue
+        match = re.search(r"po_no=(\d+)", anchor.get("href", ""))
+        if not match:
+            continue
+        lp = clean_title(cells[1].get_text(" ", strip=True))
+        notices.append(
+            {
+                "uid": int(match.group(1)),
+                "category": f"출자공고 · {lp}",
+                "title": clean_title(anchor.get_text(" ", strip=True)),
+                "date": row_date(anchor),
+                "url": urljoin(url, anchor.get("href", "")),
+                "files": [],
+                "lp": lp,
+            }
+        )
+    return notices
+
+
+def kvca_fallback_notice(notice, _state=None):
+    direct_lps = (
+        "한국벤처투자",
+        "한국성장금융",
+        "산업은행",
+        "수출입은행",
+        "국민연금",
+        "교직원공제회",
+        "행정공제회",
+        "과학기술인공제회",
+        "사학연금",
+        "공무원연금",
+        "경찰공제회",
+        "중소기업중앙회",
+        "건설근로자공제회",
+    )
+    return pef_title(notice["title"]) and not any(
+        name in notice.get("lp", "") for name in direct_lps
+    )
+
+
 def checked(scrape_fn):
     """수집기 공통 후처리. SOURCES 를 쓰는 모든 호출자(알리미·PEF 트랙)가 여기를 지난다.
 
     - uid 중복 제거: 성장금융은 상단 고정공지가 일반목록에도 같이 나와 같은 글이 두 번
       들어온다(2026-07 기준 idx=1088). 그대로 두면 텔레그램 2회 발송 / PEF 이중 기입.
-    - 0건이면 예외: 세 게시판 모두 상시 게시글이 있어 정상적으로 0건이 될 수 없다.
+    - 0건이면 예외: 감시 게시판은 모두 상시 게시글이 있어 정상적으로 0건이 될 수 없다.
       셀렉터 미스·차단을 '새 글 없음'으로 삼키지 않도록 실패로 올린다.
     """
 
@@ -327,6 +713,73 @@ SOURCES = [
     {"key": "kdb", "name": "산업은행", "scrape": checked(scrape_kdb)},
     {"key": "kgrowth", "name": "한국성장금융", "scrape": checked(scrape_kgrowth)},
     {"key": "koreaexim", "name": "수출입은행", "scrape": checked(scrape_koreaexim)},
+    {
+        "key": "kvic",
+        "name": "한국벤처투자",
+        "scrape": checked(scrape_kvic),
+        "eligible": kvic_pef_notice,
+    },
+    {
+        "key": "nps",
+        "name": "국민연금",
+        "scrape": checked(scrape_nps),
+        "eligible": nps_pef_notice,
+    },
+    {
+        "key": "nps_news",
+        "name": "국민연금 보도자료",
+        "scrape": checked(scrape_nps_news),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "ktcu",
+        "name": "한국교직원공제회",
+        "scrape": checked(scrape_ktcu),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "poba",
+        "name": "대한지방행정공제회",
+        "scrape": checked(scrape_poba),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "sema",
+        "name": "과학기술인공제회",
+        "scrape": checked(scrape_sema),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "teachers_pension",
+        "name": "사학연금",
+        "scrape": checked(scrape_teachers_pension),
+        "eligible": pef_notice,
+    },
+    {"key": "geps", "name": "공무원연금", "scrape": checked(scrape_geps), "eligible": pef_notice},
+    {
+        "key": "pmaa",
+        "name": "경찰공제회",
+        "scrape": checked(scrape_pmaa),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "kbiz",
+        "name": "중소기업중앙회",
+        "scrape": checked(scrape_kbiz),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "cw",
+        "name": "건설근로자공제회",
+        "scrape": checked(scrape_cw),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "kvca_fallback",
+        "name": "KVCA 출자공고(보완)",
+        "scrape": checked(scrape_kvca),
+        "eligible": kvca_fallback_notice,
+    },
 ]
 
 
@@ -420,6 +873,15 @@ def main():
 
         last_seen = state.get(key, 0)
         if last_seen == 0:
+            # 현재 첫 화면의 KVIC 출자계획을 미리 읽어 이후 접수/심사/선정 결과와 연결한다.
+            if key == "kvic":
+                for notice in notices:
+                    if "출자계획" not in notice.get("category", ""):
+                        continue
+                    try:
+                        kvic_pef_notice(notice, state)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[한국벤처투자] 기준선 문서 판독 실패: {exc}", file=sys.stderr)
             state[key] = max_uid
             print(f"[{name}] 최초 실행: 기준선 {max_uid} (알림 미발송)")
             continue
@@ -432,6 +894,15 @@ def main():
         sent = 0
         highest_ok = last_seen  # 안전하게 저장 가능한 최대 uid (발송 성공/불일치까지만)
         for n in new_items:
+            eligible = src.get("eligible")
+            if eligible:
+                try:
+                    if not eligible(n, state):
+                        highest_ok = n["uid"]
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{name}] PEF 적격성 판독 실패 #{n['uid']}: {exc}", file=sys.stderr)
+                    break  # 다음 실행에서 같은 글부터 다시 판독
             hits = matched_keywords(n["title"], keywords) if keywords else ["(전체)"]
             if not hits:
                 highest_ok = n["uid"]  # 키워드 불일치 = 처리 완료, 통과 가능
@@ -475,6 +946,17 @@ def demo():
     else:
         raise AssertionError("0건인데 예외가 안 났다")
     assert checked(lambda url="x": [{"uid": 1, "u": url}])(url="y")[0]["u"] == "y"  # 인자 통과
+    assert pef_title("2026년 국내 PE·VC 블라인드펀드 위탁운용사 선정")
+    assert pef_title("블라인드 펀드 위탁운용사 선정 공고")
+    assert not pef_title("2026년 VC 블라인드펀드 출자사업")
+    assert vc_only("국민연금기금 벤처펀드 국내사모투자 위탁운용사")
+    assert not vc_only("국내 PE·VC 블라인드 펀드")
+    assert kvic_pdf_allows_pef("출자 대상: 기관전용 사모집합투자기구") is True
+    assert kvic_pdf_allows_pef("출자 대상: 벤처투자조합") is False
+    assert kvic_pdf_allows_pef("일반 참고자료") is None
+    assert kvic_program_key("모태펀드(문화) 2026년 9월 출자사업 계획 공고") == kvic_program_key(
+        "모태펀드(문화) 2026년 9월 출자사업 최종 선정 결과"
+    )
     print("ok")
 
 
