@@ -13,10 +13,12 @@ import re
 import sys
 import time
 from contextlib import closing
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 import requests
 import urllib3
@@ -125,6 +127,10 @@ def row_date(element):
     row = element.find_parent(["tr", "li"]) or element.parent
     match = re.search(r"\d{4}[-./]\d{2}[-./]\d{2}", row.get_text(" ", strip=True))
     return match.group(0) if match else ""
+
+
+def date_key(value):
+    return re.sub(r"\D", "", value)[:8]
 
 
 def scrape_static_board(
@@ -1068,9 +1074,19 @@ def main():
                         src["eligible"](notice, state)
                     except Exception as exc:  # noqa: BLE001
                         print(f"[{name}] 기준선 문서 판독 실패: {exc}", file=sys.stderr)
-            state[key] = max_uid
-            print(f"[{name}] 최초 실행: 기준선 {max_uid} (알림 미발송)")
-            continue
+            today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+            today_items = [n for n in notices if date_key(n.get("date", "")) == today]
+            if not today_items:
+                state[key] = max_uid
+                print(f"[{name}] 최초 실행: 기준선 {max_uid} (알림 미발송)")
+                continue
+            first_today = min(n["uid"] for n in today_items)
+            last_seen = max(
+                (n["uid"] for n in notices if n["uid"] < first_today),
+                default=first_today - 1,
+            )
+            state[key] = last_seen
+            print(f"[{name}] 최초 실행: 기준선 {last_seen}, 오늘 글 {len(today_items)}건 처리")
 
         new_items = sorted([n for n in notices if n["uid"] > last_seen], key=lambda x: x["uid"])
         if not new_items:
@@ -1140,6 +1156,7 @@ def demo():
     assert kvic_pdf_allows_pef("출자 대상: 기관전용 사모집합투자기구") is True
     assert kvic_pdf_allows_pef("출자 대상: 벤처투자조합") is False
     assert kvic_pdf_allows_pef("일반 참고자료") is None
+    assert date_key("2026.09.23") == "20260923"
     assert kvic_program_key("모태펀드(문화) 2026년 9월 출자사업 계획 공고") == kvic_program_key(
         "모태펀드(문화) 2026년 9월 출자사업 최종 선정 결과"
     )

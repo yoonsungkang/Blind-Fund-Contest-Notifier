@@ -20,7 +20,9 @@
   "kbiz": 164021,
   "cw": 34254,
   "kvca_fallback": 900,
-  "_woori_pef_programs": {},
-  "woori_am": 2026092301,
+  "_woori_pef_programs": {
+    "국민성장펀드간접투자분야초장기기술투자펀드": true
+  },
+  "woori_am": 2026091501,
   "samsung_am": 244408
 }
