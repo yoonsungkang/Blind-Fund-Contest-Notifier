@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """정책금융기관 공지 실시간 알리미 (텔레그램).
 
-감시 대상: 정책금융기관·연기금·공제회 공식 게시판과 KVCA 보완 공고.
+감시 대상: 정책금융기관·연기금·공제회·민간 자산운용사 공식 게시판과 KVCA 보완 공고.
 
 각 사이트에서 새 글을 감지하고, 제목이 키워드와 맞으면 텔레그램으로 알린다.
 사이트별 마지막으로 본 글 ID는 state.json에 저장한다.
@@ -12,8 +12,10 @@ import os
 import re
 import sys
 import time
+from contextlib import closing
 from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urljoin
 
 import requests
@@ -56,6 +58,9 @@ PMAA_BOARD = "https://www.pmaa.or.kr/www/1461126378922/bbs.do"
 KBIZ_BOARD = "https://www.kbiz.or.kr/ko/contents/bbs/list.do?mnSeq=211"
 CW_BOARD = "https://www.cw.or.kr/board.do?boardConfigNo=29&menuNo=248&boardCategoryNo=66"
 KVCA_BOARD = "https://www.kvca.or.kr/Program/invest/list.html?a_cd=8&a_gb=board&a_item=0&sm=2_2_2"
+SHINHAN_BOARD = "https://www.shinhanfund.com/ko/mobile/board/notice"
+WOORI_BOARD = "https://www.wooriam.kr/customer/notice-list"
+SAMSUNG_BOARD = "https://www.samsungfund.com/fund/lounge/notice.do"
 
 
 # --------------------------------------------------------------------------
@@ -122,7 +127,9 @@ def row_date(element):
     return match.group(0) if match else ""
 
 
-def scrape_static_board(url, selector, id_pattern, category, detail_url=None):
+def scrape_static_board(
+    url, selector, id_pattern, category, detail_url=None, title_selector=None
+):
     """링크/onclick에 숫자 ID가 있는 정적 게시판 공통 수집기."""
     notices = []
     for element in fetch_soup(url).select(selector):
@@ -130,7 +137,8 @@ def scrape_static_board(url, selector, id_pattern, category, detail_url=None):
             filter(None, [element.get("href", ""), element.get("onclick", "")])
         )
         match = re.search(id_pattern, marker)
-        title = clean_title(element.get_text(" ", strip=True))
+        title_element = element.select_one(title_selector) if title_selector else element
+        title = clean_title(title_element.get_text(" ", strip=True)) if title_element else ""
         if not match or not title:
             continue
         detail = (
@@ -194,11 +202,35 @@ def kvic_pdf_allows_pef(text):
     return any(target in compact[pos : pos + 1200] for pos in headings)
 
 
+def document_text(content, name):
+    """PDF/HWP 공고문을 표 내용까지 포함한 텍스트로 변환한다."""
+    lower = name.lower()
+    if content.startswith(b"%PDF") or lower.endswith(".pdf"):
+        from pypdf import PdfReader
+
+        return "\n".join(
+            page.extract_text() or "" for page in PdfReader(BytesIO(content)).pages
+        )
+    if content.startswith(b"\xd0\xcf\x11\xe0") or lower.endswith(".hwp"):
+        from bs4 import BeautifulSoup
+        from hwp5.hwp5html import HTMLTransform
+        from hwp5.xmlmodel import Hwp5File
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "notice.hwp"
+            path.write_bytes(content)
+            output = BytesIO()
+            with closing(Hwp5File(str(path))) as hwp:
+                HTMLTransform().transform_hwp5_to_xhtml(hwp, output)
+            return BeautifulSoup(output.getvalue(), "html.parser").get_text(
+                " ", strip=True
+            )
+    return None
+
+
 def kvic_document_allows_pef(notice):
     """KVIC 출자계획 PDF의 신청 가능 비히클을 확인하고 첨부 링크도 채운다."""
     from bs4 import BeautifulSoup
-    from pypdf import PdfReader
-
     session = requests.Session()
     session.headers.update(HEADERS)
     resp = session.get(notice["url"], timeout=30)
@@ -224,11 +256,11 @@ def kvic_document_allows_pef(notice):
         if not pdf.content.startswith(b"%PDF"):
             continue
         try:
-            text = "\n".join(
-                page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages
-            )
+            text = document_text(pdf.content, "notice.pdf")
         except Exception as exc:  # noqa: BLE001
             print(f"  KVIC PDF 판독 실패: {exc}", file=sys.stderr)
+            continue
+        if text is None:
             continue
         decision = kvic_pdf_allows_pef(text)
         if decision is not None:
@@ -247,10 +279,8 @@ def kvic_pef_notice(notice, state):
         if is_plan and key:
             cache[key] = True
         return True
-    if key in cache:
-        return cache[key]
     if not is_plan:
-        return False
+        return cache.get(key, False)
 
     decision = kvic_document_allows_pef(notice)
     if decision is not None and key:
@@ -637,6 +667,132 @@ def scrape_cw(url=CW_BOARD):
     )
 
 
+def scrape_shinhan(url=SHINHAN_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="/ko/mobile/board/noticeView?no="]',
+        r"no=(\d+)",
+        "공지",
+        title_selector=".tb-subj",
+    )
+
+
+def scrape_woori(url=WOORI_BOARD):
+    rows = []
+    for anchor in fetch_soup(url).select(
+        'a[href*="goView"][href*="/customer/notice-view"]'
+    ):
+        match = re.search(
+            r"goView\('[^']+',\s*'([^']+)'", anchor.get("href", "")
+        )
+        date = row_date(anchor)
+        digits = re.sub(r"\D", "", date)
+        if not match or len(digits) != 8:
+            continue
+        rows.append(
+            {
+                "category": "공지",
+                "title": clean_title(anchor.get_text(" ", strip=True)),
+                "date": date,
+                "url": f"https://www.wooriam.kr/customer/notice-view/{match.group(1)}",
+                "files": [],
+            }
+        )
+
+    counts = {}
+    # ponytail: 하루 게시물이 첫 화면(10건) 미만이라는 전제. 넘으면 문자열 cursor로 바꾼다.
+    for notice in reversed(rows):
+        day = re.sub(r"\D", "", notice["date"])
+        counts[day] = counts.get(day, 0) + 1
+        notice["uid"] = int(day) * 100 + counts[day]
+    return rows
+
+
+def scrape_samsung(url=SAMSUNG_BOARD):
+    return scrape_static_board(
+        url,
+        'a[href*="notice-view.do?no="]',
+        r"no=(\d+)",
+        "공지",
+        title_selector=".tit",
+    )
+
+
+def private_program_key(title):
+    compact = re.sub(r"\s+", "", title)
+    compact = re.sub(r"20\d{2}년(?:도)?", "", compact)
+    compact = re.sub(r"\(?재공고\)?", "", compact)
+    compact = re.sub(
+        r"위탁운용사|(?<!투)자펀드|출자사업|선정계획|제안서|서류심사|최종|접수|선정|결과|공고|FAQ|게시",
+        "",
+        compact,
+    )
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", compact)
+
+
+def detail_documents_allow_pef(notice, selector):
+    soup = fetch_soup(notice["url"])
+    documents, files = [], []
+    for anchor in soup.select(selector):
+        name = clean_title(anchor.get_text(" ", strip=True))
+        href = urljoin(notice["url"], anchor.get("href", ""))
+        if not name or not href or any(item["url"] == href for item in files):
+            continue
+        files.append({"name": name, "url": href})
+        if re.search(r"\.(?:pdf|hwp)\b", name, re.IGNORECASE):
+            documents.append((name, href))
+    notice["files"] = files
+
+    decided = False
+    for name, url in documents[:2]:
+        resp = requests.get(
+            url, headers={**HEADERS, "Referer": notice["url"]}, timeout=30
+        )
+        resp.raise_for_status()
+        text = document_text(resp.content, name)
+        if text:
+            decision = kvic_pdf_allows_pef(text)
+            if decision is True:
+                return True
+            decided = decided or decision is False
+    return False if decided else None
+
+
+def private_am_pef_notice(notice, state, cache_name, file_selector):
+    cache = state.setdefault(cache_name, {})
+    title = notice["title"]
+    key = private_program_key(title)
+    is_plan = not re.search(r"결과|FAQ", title) and bool(
+        re.search(r"선정\s*계획|선정\s*공고|출자사업.*공고", title)
+    )
+
+    if pef_title(title):
+        if is_plan and key:
+            cache[key] = True
+        return True
+    if not is_plan:
+        return cache.get(key, False)
+
+    decision = detail_documents_allow_pef(notice, file_selector)
+    if decision is not None and key:
+        cache[key] = decision
+    if decision is None:
+        print(f"PEF 판정 보류(PDF/HWP 텍스트 없음): {title}", file=sys.stderr)
+    return decision is True
+
+
+def shinhan_pef_notice(notice, state):
+    return private_am_pef_notice(
+        notice, state, "_shinhan_pef_programs", "a.atc-link[href]"
+    )
+
+
+def woori_pef_notice(notice, state):
+    return private_am_pef_notice(
+        notice, state, "_woori_pef_programs", "a.layout-board-view__download[href]"
+    )
+
+
 def scrape_kvca(url=KVCA_BOARD):
     notices = []
     for row in fetch_soup(url).select("table tr"):
@@ -679,10 +835,16 @@ def kvca_fallback_notice(notice, _state=None):
         "경찰공제회",
         "중소기업중앙회",
         "건설근로자공제회",
+        "신한자산운용",
+        "우리자산운용",
+        "삼성자산운용",
     )
-    return pef_title(notice["title"]) and not any(
-        name in notice.get("lp", "") for name in direct_lps
-    )
+    if any(name in notice.get("lp", "") for name in direct_lps):
+        return False
+    if pef_title(notice["title"]):
+        return True
+    detail = re.sub(r"\s+", "", fetch_soup(notice["url"]).get_text(" ", strip=True))
+    return "기관전용사모집합투자기구" in detail
 
 
 def checked(scrape_fn):
@@ -772,6 +934,24 @@ SOURCES = [
         "key": "cw",
         "name": "건설근로자공제회",
         "scrape": checked(scrape_cw),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "shinhan_am",
+        "name": "신한자산운용",
+        "scrape": checked(scrape_shinhan),
+        "eligible": shinhan_pef_notice,
+    },
+    {
+        "key": "woori_am",
+        "name": "우리자산운용",
+        "scrape": checked(scrape_woori),
+        "eligible": woori_pef_notice,
+    },
+    {
+        "key": "samsung_am",
+        "name": "삼성자산운용",
+        "scrape": checked(scrape_samsung),
         "eligible": pef_notice,
     },
     {
@@ -882,6 +1062,12 @@ def main():
                         kvic_pef_notice(notice, state)
                     except Exception as exc:  # noqa: BLE001
                         print(f"[한국벤처투자] 기준선 문서 판독 실패: {exc}", file=sys.stderr)
+            elif key in {"shinhan_am", "woori_am"}:
+                for notice in sorted(notices, key=lambda item: item["uid"]):
+                    try:
+                        src["eligible"](notice, state)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[{name}] 기준선 문서 판독 실패: {exc}", file=sys.stderr)
             state[key] = max_uid
             print(f"[{name}] 최초 실행: 기준선 {max_uid} (알림 미발송)")
             continue
@@ -956,6 +1142,19 @@ def demo():
     assert kvic_pdf_allows_pef("일반 참고자료") is None
     assert kvic_program_key("모태펀드(문화) 2026년 9월 출자사업 계획 공고") == kvic_program_key(
         "모태펀드(문화) 2026년 9월 출자사업 최종 선정 결과"
+    )
+    assert private_program_key(
+        "(재공고) 과학기술혁신펀드 2026년 위탁운용사 선정계획 공고"
+    ) == private_program_key(
+        "과학기술혁신펀드 2026년 위탁운용사 최종 선정 결과"
+    )
+    assert private_program_key(
+        "『국민성장펀드 초장기기술투자펀드』 위탁운용사 선정계획 공고"
+    ) == "국민성장펀드초장기기술투자펀드"
+    assert private_program_key(
+        "『국민성장펀드 초장기기술투자펀드』 위탁운용사 선정계획 공고"
+    ) == private_program_key(
+        "『국민성장펀드 초장기기술투자펀드』 위탁운용사 선정 서류심사 결과"
     )
     print("ok")
 

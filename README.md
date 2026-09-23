@@ -15,7 +15,8 @@
 | 과학기술인공제회 | [공지사항](https://www.sema.or.kr/sema/bbs/B0000022/list.do?menuNo=200017&optn1=S) | 정적 HTML |
 | 사학연금·공무원연금·경찰공제회 | 각 기관 공식 공지사항 | 정적 HTML |
 | 중소기업중앙회·건설근로자공제회 | 각 기관 공식 공지/선정공고 | 정적 HTML |
-| 우정사업본부·군인공제회 등 | [KVCA 출자공고](https://www.kvca.or.kr/Program/invest/list.html?a_cd=8&a_gb=board&a_item=0&sm=2_2_2) | 공식 직접 수집이 막힌 기관만 보완 |
+| 신한·우리·삼성자산운용 | [신한](https://www.shinhanfund.com/ko/mobile/board/notice) · [우리](https://www.wooriam.kr/customer/notice-list) · [삼성](https://www.samsungfund.com/fund/lounge/notice.do) 공지사항 | 정적 HTML + PDF/HWP 비히클 판독 |
+| 에너지인프라자산운용·우정사업본부·군인공제회 등 | [KVCA 출자공고](https://www.kvca.or.kr/Program/invest/list.html?a_cd=8&a_gb=board&a_item=0&sm=2_2_2) | 공식 직접 수집이 막힌 기관만 보완 |
 
 ## API 확인 결과 (2026-09-23)
 
@@ -27,6 +28,8 @@
 - 이번에 추가한 연기금·공제회는 기관 공식 문서와 공공데이터포털에서 출자사업 공고용 공개 API를
   확인하지 못했다. 따라서 **관련 API가 있는 데이터는 API 우선, 알림 이력이 없는 부분만 공식
   게시판**이라는 원칙으로 구현했다.
+- 신한·우리·삼성자산운용도 출자사업 공고용 공개 API는 확인되지 않았고, 공식 게시판이 서버에서
+  완성된 HTML을 제공하므로 해당 HTML을 직접 수집한다.
 
 ## 동작 방식
 
@@ -38,7 +41,7 @@
 KVIC처럼 제목만으로 비히클을 알 수 없는 경우에는 출자계획 PDF의 `출자대상` 또는
 `신청가능조합형태` 문맥에서 `기관전용 사모집합투자기구`를 확인한다. 판정 결과를 사업 단위로
 `state.json`에 저장해 같은 사업의 접수현황·서류결과·최종선정에도 적용한다. VC/벤처 전용 공고는
-제외한다.
+제외한다. 신한·우리자산운용도 같은 방식으로 PDF/HWP 공고문의 표까지 판독한다.
 
 > 키워드 매칭: 영문 약어(`PE` 등)는 단어 단위로, 한글은 띄어쓰기를 무시하고 비교합니다.
 > 여러 단어 키워드(예: `위탁운용사 선정`)는 모든 단어가 들어가면 매칭됩니다.
