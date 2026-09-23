@@ -1,5 +1,23 @@
 {
   "kdb": 1111,
   "kgrowth": 1122,
-  "koreaexim": 116241
+  "koreaexim": 116241,
+  "_kvic_pef_programs": {
+    "충남기업성장벤처펀드2차": false,
+    "모태펀드(관광,스포츠)9월수시": true,
+    "경북·전남지역혁신벤처펀드": false,
+    "경북-포스코혁신성장벤처펀드": false
+  },
+  "kvic": 5142,
+  "nps": 202600000000001025,
+  "nps_news": 202600000000001062,
+  "ktcu": 61922,
+  "poba": 97452,
+  "sema": 147741,
+  "teachers_pension": 3847,
+  "geps": 43137,
+  "pmaa": 42588,
+  "kbiz": 164021,
+  "cw": 34254,
+  "kvca_fallback": 900
 }
