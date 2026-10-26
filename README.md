@@ -16,7 +16,8 @@
 | 사학연금·공무원연금·경찰공제회 | 각 기관 공식 공지사항 | 정적 HTML |
 | 중소기업중앙회·건설근로자공제회 | 각 기관 공식 공지/선정공고 | 정적 HTML |
 | 신한·우리·삼성자산운용 | [신한](https://www.shinhanfund.com/ko/mobile/board/notice) · [우리](https://www.wooriam.kr/customer/notice-list) · [삼성](https://www.samsungfund.com/fund/lounge/notice.do) 공지사항 | 정적 HTML + PDF/HWP 비히클 판독 |
-| 에너지인프라자산운용·우정사업본부·군인공제회 등 | [KVCA 출자공고](https://www.kvca.or.kr/Program/invest/list.html?a_cd=8&a_gb=board&a_item=0&sm=2_2_2) | 공식 직접 수집이 막힌 기관만 보완 |
+| 우정사업본부 | [자산운용시스템](https://www.kpasset.go.kr/board.es?mid=a10510000000&bid=0041&act=list) 예금·보험 게시판 | 정적 HTML |
+| 에너지인프라자산운용·군인공제회 등 | [KVCA 출자공고](https://www.kvca.or.kr/Program/invest/list.html?a_cd=8&a_gb=board&a_item=0&sm=2_2_2) | 공식 직접 수집이 막힌 기관만 보완 |
 
 ## API 확인 결과 (2026-09-23)
 

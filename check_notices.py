@@ -63,6 +63,7 @@ KVCA_BOARD = "https://www.kvca.or.kr/Program/invest/list.html?a_cd=8&a_gb=board&
 SHINHAN_BOARD = "https://www.shinhanfund.com/ko/mobile/board/notice"
 WOORI_BOARD = "https://www.wooriam.kr/customer/notice-list"
 SAMSUNG_BOARD = "https://www.samsungfund.com/fund/lounge/notice.do"
+KPASSET_BOARD = "https://www.kpasset.go.kr/board.es?mid=a10510000000&bid={bid}&act=list"
 
 
 # --------------------------------------------------------------------------
@@ -374,6 +375,13 @@ def scrape_kdb(url=KDB_BOARD, timeout_ms=45000, pages=1):
             read_rows()
         browser.close()
     return notices
+
+
+def kdb_pef_notice(notice, _state=None):
+    """KDB 공지는 입찰·채용·전산 안내가 대부분이다. 출자사업 글만 통과시킨다."""
+    if notice.get("category") in ("입찰공고", "채용"):
+        return False
+    return bool(re.search(r"위탁운용|출자|펀드|PEF", notice["title"]))
 
 
 def scrape_kgrowth(url=KGROWTH_BOARD, pages=1):
@@ -826,6 +834,35 @@ def scrape_kvca(url=KVCA_BOARD):
     return notices
 
 
+def scrape_kpasset(bid, pages=1):
+    """우정사업본부 자산운용시스템 게시판(0041 예금 · 0042 보험). 정적 HTML.
+
+    목록 글자는 '..'로 잘리므로 전체 제목은 링크의 title 속성에서 읽는다.
+    한 쪽 = 10건. 알리미는 1쪽, PEF 트랙 기간 조회는 pages 쪽까지 본다.
+    """
+    url = KPASSET_BOARD.format(bid=bid)
+    notices = []
+    anchors = []
+    for pno in range(1, pages + 1):
+        anchors += fetch_soup(f"{url}&nPage={pno}").select('td.title a[href*="list_no="]')
+    for a in anchors:
+        match = re.search(r"list_no=(\d+)", a.get("href", ""))
+        title = clean_title(a.get("title") or a.get_text(" ", strip=True))
+        if not match or not title:
+            continue
+        notices.append(
+            {
+                "uid": int(match.group(1)),
+                "category": "예금" if bid == "0041" else "보험",
+                "title": title,
+                "date": row_date(a),
+                "url": urljoin(url, a.get("href", "")),
+                "files": [],
+            }
+        )
+    return notices
+
+
 def kvca_fallback_notice(notice, _state=None):
     direct_lps = (
         "한국벤처투자",
@@ -844,6 +881,9 @@ def kvca_fallback_notice(notice, _state=None):
         "신한자산운용",
         "우리자산운용",
         "삼성자산운용",
+        # 우정사업본부는 kpasset 직접 수집과 별개로 KVCA 도 계속 본다. 두 게시판 제목이
+        # 달라 같은 공고를 가려낼 수 없고, 한쪽에만 올라오는 글이 있다(10월 블라인드 PEF
+        # 우협 안내는 kpasset 에만). kpasset 이 실패해도 KVCA 로 받는다. 중복 알림이 누락보다 낫다.
     )
     if any(name in notice.get("lp", "") for name in direct_lps):
         return False
@@ -878,7 +918,12 @@ def checked(scrape_fn):
 
 
 SOURCES = [
-    {"key": "kdb", "name": "산업은행", "scrape": checked(scrape_kdb)},
+    {
+        "key": "kdb",
+        "name": "산업은행",
+        "scrape": checked(scrape_kdb),
+        "eligible": kdb_pef_notice,
+    },
     {"key": "kgrowth", "name": "한국성장금융", "scrape": checked(scrape_kgrowth)},
     {"key": "koreaexim", "name": "수출입은행", "scrape": checked(scrape_koreaexim)},
     {
@@ -958,6 +1003,18 @@ SOURCES = [
         "key": "samsung_am",
         "name": "삼성자산운용",
         "scrape": checked(scrape_samsung),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "kpasset_deposit",
+        "name": "우정사업본부(예금)",
+        "scrape": checked(lambda pages=1: scrape_kpasset("0041", pages)),
+        "eligible": pef_notice,
+    },
+    {
+        "key": "kpasset_insurance",
+        "name": "우정사업본부(보험)",
+        "scrape": checked(lambda pages=1: scrape_kpasset("0042", pages)),
         "eligible": pef_notice,
     },
     {
@@ -1172,6 +1229,14 @@ def demo():
         "『국민성장펀드 초장기기술투자펀드』 위탁운용사 선정계획 공고"
     ) == private_program_key(
         "『국민성장펀드 초장기기술투자펀드』 위탁운용사 선정 서류심사 결과"
+    )
+    assert not kdb_pef_notice({"category": "입찰공고", "title": "[입찰공고]전용회선 1사업자 선정"})
+    assert not kdb_pef_notice({"category": "안내", "title": "타 기관 서비스 일시 중단(순단) 안내"})
+    assert kdb_pef_notice(
+        {"category": "안내", "title": "『정책금융기관 글로벌 스케일업 협력펀드』 위탁운용사 선정 서류심사 결과"}
+    )
+    assert kvca_fallback_notice(  # 우본은 KVCA 로도 계속 받는다
+        {"lp": "우정사업본부", "title": "2026년 우체국금융 국내 블라인드 PEF 위탁운용사 선정 공고"}
     )
     print("ok")
 
