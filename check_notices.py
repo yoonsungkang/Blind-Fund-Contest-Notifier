@@ -114,10 +114,10 @@ def matched_keywords(title, keywords):
     return [k for k in keywords if keyword_matches(title, k)]
 
 
-def fetch_soup(url):
+def fetch_soup(url, sess=requests):
     from bs4 import BeautifulSoup
 
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp = sess.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     if (resp.encoding or "").lower() == "iso-8859-1":
         resp.encoding = resp.apparent_encoding
@@ -834,6 +834,26 @@ def scrape_kvca(url=KVCA_BOARD):
     return notices
 
 
+def _kpasset_session():
+    """kpasset 서버는 AES128-SHA(RSA 키교환)만 받는다 — Python 3.10+ 기본 암호군이 빼서 핸드셰이크 실패(2026-11-13~).
+    인증서 검증은 그대로 두고 이 호스트에 한해 SECLEVEL=1 로 암호군만 넓힌다."""
+    import ssl
+    from requests.adapters import HTTPAdapter
+
+    ctx = ssl.create_default_context()
+    ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+
+    class _Adapter(HTTPAdapter):
+        def init_poolmanager(self, *a, **kw):
+            kw["ssl_context"] = ctx
+            return super().init_poolmanager(*a, **kw)
+
+    sess = requests.Session()
+    for prefix in ("https://www.kpasset.go.kr/", "https://www.kpasset.go.kr:443/"):
+        sess.mount(prefix, _Adapter())
+    return sess
+
+
 def scrape_kpasset(bid, pages=1):
     """우정사업본부 자산운용시스템 게시판(0041 예금 · 0042 보험). 정적 HTML.
 
@@ -843,8 +863,9 @@ def scrape_kpasset(bid, pages=1):
     url = KPASSET_BOARD.format(bid=bid)
     notices = []
     anchors = []
+    sess = _kpasset_session()
     for pno in range(1, pages + 1):
-        anchors += fetch_soup(f"{url}&nPage={pno}").select('td.title a[href*="list_no="]')
+        anchors += fetch_soup(f"{url}&nPage={pno}", sess).select('td.title a[href*="list_no="]')
     for a in anchors:
         match = re.search(r"list_no=(\d+)", a.get("href", ""))
         title = clean_title(a.get("title") or a.get_text(" ", strip=True))
